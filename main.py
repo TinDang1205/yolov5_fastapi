@@ -1,4 +1,5 @@
 import shutil
+import uvicorn
 
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,3 +58,6 @@ async def create_upload_file(uploaded_file: UploadFile = File(...)):
         return jsonable_encoder(data)
 
     return 'Upload file to detect'
+# Start Backend
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=8000)

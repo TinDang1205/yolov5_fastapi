@@ -20,12 +20,17 @@ from PIL import Image
 from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from yolov5.utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, colorstr, cv2,
-                           increment_path, non_max_suppression, print_args, scale_boxes, scale_segments,
-                           strip_optimizer)
+                                  increment_path, non_max_suppression, print_args, scale_boxes, scale_segments,
+                                  strip_optimizer)
 from yolov5.utils.segment.general import masks2segments, process_mask, process_mask_native
 from yolov5.utils.torch_utils import select_device, smart_inference_mode
 
 destination = 'static/mask/'
+lasted_path = ''
+frame_mask_bboxes = {}
+frame_mask_bboxes_filtered = {}
+
+center_y = 0
 
 
 def convert_to_3d_repeat(data_2d, z):
@@ -124,6 +129,7 @@ def predict_model(
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
         mask_bboxes_per_frame = []
+        mask_bboxes_per_frame_filtered = []
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
@@ -177,41 +183,82 @@ def predict_model(
                 if cv2.waitKey(1) == ord('q'):  # 1 millisecond
                     exit()
 
-            frame_mask_bboxes = {}
+            mask_img = im0
+            mask_img = np.zeros(im0.shape[:2], dtype=np.uint8)
             # Write results
             for j, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
-                if save_txt:  # Write to file
+                if save_txt:
                     seg = segments[j].reshape(-1)  # (n,2) to (n*2)
 
                     line = (cls, *seg, conf) if save_conf else (cls, *seg)  # label format
                     with open(f'{txt_path}.txt', 'a') as f:
                         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-                    # Extract mask coordinates and save as PNG image
                     mask_coords = masks2segments(masks)[j]
-                    # print(type(mask_coords[0]))
                     mask_coords = mask_coords.reshape((-1, 1, 2))
                     label = "label_{}".format(j)
                     if label not in frame_mask_bboxes:
                         frame_mask_bboxes[label] = []
-                    frame_mask_bboxes[label].append(mask_coords.tolist())
-                    # mask_coords = np.array(mask_coords, dtype=float)
+                    frame_mask_bboxes[label] = mask_coords.tolist()
+            mask_bboxes_per_frame.append(frame_mask_bboxes)
+            output_path = str(save_dir / 'mask_bboxes.json')
+            with open(output_path, 'w') as json_file:
+                json.dump(mask_bboxes_per_frame, json_file, indent=4)
 
-                    # print(mask_coords)
+            center_y = position_center(save_dir)
+            # Load JSON data from the file
+            label_number = 0
+            for j, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
+                if save_txt:  # Write to file
+                    # Extract mask coordinates and save as PNG image
+                    mask_coords = masks2segments(masks)[j]
+                    y_coordinates = mask_coords[:, 1]
+                    min_y = np.min(y_coordinates)
+                    if min_y < center_y:
+                        # print(type(mask_coords[0]))
+                        mask_coords = mask_coords.reshape((-1, 1, 2))
+                        mask_coords = np.array(mask_coords, dtype=float)
+                        label = "label_{}".format(label_number)
+                        if label not in frame_mask_bboxes_filtered:
+                            frame_mask_bboxes_filtered[label] = []
+                        frame_mask_bboxes_filtered[label] = mask_coords.tolist()
+                        label_number += 1
+                        # print(mask_coords)
 
-                    mask_img = np.zeros(im0.shape[:2], dtype=np.uint8)
-                    mask_img = mask_img
+                        cv2.fillPoly(mask_img, [np.array(mask_coords.tolist(), np.int32)], color=(255, 255, 255))
+                        # cv2.polylines(mask_img,[np.array(mask_coords.tolist(),np.int32)],1 , color=(255, 255, 255))
 
-                    # print(mask_coords)
-                    cv2.fillPoly(mask_img, np.int32(mask_coords), color=(255, 255, 255))
+                        mask_path = str(save_dir / 'mask_images' / p.stem)
+                        if not os.path.exists(mask_path):
+                            os.makedirs(mask_path)
+                        # Save the mask image using class name and a unique identifier
+                        mask_name = f'mask_{names[int(cls)]}_{j}.png'
+                        mask_path = str(save_dir / 'mask_images' / p.stem / mask_name)
+                        print(type(mask_img))
 
-                    mask_path = str(save_dir / 'mask_images')
-                    if not os.path.exists(mask_path):
-                        os.makedirs(mask_path)
-                    # Save the mask image using class name and a unique identifier
-                    mask_name = f'mask_{names[int(cls)]}_{j}.png'
-                    mask_path = str(save_dir / 'mask_images' / mask_name)
-                    cv2.imwrite(mask_path, mask_img)
+                        cv2.imwrite(mask_path, mask_img)
+
+                        src = cv2.imread(mask_path, 1)
+                        # Convert black pixels to transparent and keep white pixels
+
+                        tmp = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+                        # Applying thresholding technique
+                        _, alpha = cv2.threshold(tmp, 0, 255, cv2.THRESH_BINARY)
+                        # Using cv2.split() to split channels
+                        # of coloured image
+                        b, g, r = cv2.split(src)
+
+                        # Making list of Red, Green, Blue
+                        # Channels and alpha
+                        rgba = [b, g, r, alpha]
+                        dst = cv2.merge(rgba, 4)
+                        cv2.imwrite(mask_path, dst)
+
+                        src = Image.open(mask_path)
+
+                        im2 = src.crop(src.getbbox())
+                        lasted_path = mask_path
+                        im2.save(mask_path)
 
                 if save_img or save_crop or view_img:  # Add bbox to image
                     c = int(cls)  # integer class
@@ -220,7 +267,7 @@ def predict_model(
                     # annotator.draw.polygon(segments[j], outline=colors(c, True), width=3)
                 if save_crop:
                     save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-            mask_bboxes_per_frame.append(frame_mask_bboxes)
+            mask_bboxes_per_frame_filtered.append(frame_mask_bboxes_filtered)
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'image':
@@ -242,10 +289,9 @@ def predict_model(
 
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
-
     output_path = str(save_dir / 'mask_bboxes.json')
     with open(output_path, 'w') as json_file:
-        json.dump(mask_bboxes_per_frame, json_file, indent=4)
+        json.dump(mask_bboxes_per_frame_filtered, json_file, indent=4)
     # Print results
     t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
@@ -258,28 +304,21 @@ def predict_model(
     data = json.loads(f.read())
     filename = os.path.basename(save_path).split('/')[-1]
     new_path = destination + filename
-    # shutil.move(save_path, new_path)
+    shutil.move(lasted_path, new_path)
+    return new_path, data, filename
+
+
+def position_center(save_dir):
+    output_path = str(save_dir / 'mask_bboxes.json')
+    f = open(output_path, "r")
+    data = json.loads(f.read())
     all_values_y = []
-    all_values_x = []
     for label_data in data:
         for label_key, label_coords in label_data.items():
             for coords_list in label_coords:
                 for coords in coords_list:
-                    for coord_pair in coords:
-                        all_values_x.extend({coord_pair[0]})
-                        all_values_y.extend({coord_pair[1]})
-    max_value_x = max(all_values_x)
-    min_value_x = min(all_values_x)
-    max_value_y = max(all_values_y)
-    min_value_y = min(all_values_y)
-    img = cv2.imread(save_path)
-    x1 = (min_value_x - 50)
-    x2 = (max_value_x + 50)
-    y1 = (min_value_y - 50)
-    y2 = (max_value_y + 50)
-    cropped_img = img[int(y1):int(y2), int(x1):int(x2)]
-    cv2.imwrite(new_path, cropped_img)
-    return new_path, data, filename
+                    all_values_y.extend({coords[1]})
+    return np.mean(all_values_y)
 
 
 def parse_opt():
