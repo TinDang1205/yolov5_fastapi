@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import json
 from pathlib import Path
+from PIL import Image
 
 import torch
 
@@ -16,7 +17,6 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from ultralytics.utils.plotting import Annotator, colors, save_one_box
-from PIL import Image
 from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from yolov5.utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, colorstr, cv2,
@@ -206,8 +206,11 @@ def predict_model(
                 json.dump(mask_bboxes_per_frame, json_file, indent=4)
 
             center_y = position_center(save_dir)
-            # Load JSON data from the file
-            label_number = 0
+
+            bracesList = []
+
+            # Draw Braces
+            canDrawBraces = True
             for j, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
                 if save_txt:  # Write to file
                     # Extract mask coordinates and save as PNG image
@@ -215,18 +218,17 @@ def predict_model(
                     y_coordinates = mask_coords[:, 1]
                     min_y = np.min(y_coordinates)
                     if min_y < center_y:
-                        # print(type(mask_coords[0]))
                         mask_coords = mask_coords.reshape((-1, 1, 2))
-                        mask_coords = np.array(mask_coords, dtype=float)
-                        label = "label_{}".format(label_number)
-                        if label not in frame_mask_bboxes_filtered:
-                            frame_mask_bboxes_filtered[label] = []
-                        frame_mask_bboxes_filtered[label] = mask_coords.tolist()
-                        label_number += 1
-                        # print(mask_coords)
+                        mask_coords = np.array(mask_coords, dtype=np.int32)
 
-                        cv2.fillPoly(mask_img, [np.array(mask_coords.tolist(), np.int32)], color=(255, 255, 255))
-                        # cv2.polylines(mask_img,[np.array(mask_coords.tolist(),np.int32)],1 , color=(255, 255, 255))
+                        label = "label_{}".format(j)
+                        if label not in frame_mask_bboxes:
+                            frame_mask_bboxes[label] = []
+                        print(label)
+                        frame_mask_bboxes[label] = mask_coords.tolist()
+
+                        # print(mask_coords)
+                        cv2.fillPoly(mask_img, [mask_coords], color=(255, 255, 255))
 
                         mask_path = str(save_dir / 'mask_images' / p.stem)
                         if not os.path.exists(mask_path):
@@ -238,27 +240,33 @@ def predict_model(
 
                         cv2.imwrite(mask_path, mask_img)
 
-                        src = cv2.imread(mask_path, 1)
-                        # Convert black pixels to transparent and keep white pixels
+                        if canDrawBraces:
+                            mask_img = cv2.imread(mask_path, 1)
+                            ## Get center point
+                            # Reshape the array to remove the second dimension (shape will become (105, 2))
+                            flattened_points = mask_coords.squeeze()
 
-                        tmp = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
-                        # Applying thresholding technique
-                        _, alpha = cv2.threshold(tmp, 0, 255, cv2.THRESH_BINARY)
-                        # Using cv2.split() to split channels
-                        # of coloured image
-                        b, g, r = cv2.split(src)
+                            # Calculate the mean along each axis to get the center point
+                            center_point = np.mean(flattened_points, axis=0)
+                            ## Get center point
+                            bracesList.append(center_point)
 
-                        # Making list of Red, Green, Blue
-                        # Channels and alpha
-                        rgba = [b, g, r, alpha]
-                        dst = cv2.merge(rgba, 4)
-                        cv2.imwrite(mask_path, dst)
+                            bracesSize = 5
+                            pointsRect = np.array([(center_point[0] - bracesSize, center_point[1] + (bracesSize + 5)),
+                                                   (center_point[0] + bracesSize, center_point[1] + (bracesSize + 5)),
+                                                   (center_point[0] + bracesSize, center_point[1] - (bracesSize + 5)),
+                                                   (center_point[0] - bracesSize, center_point[1] - (bracesSize + 5))
+                                                   ])
+                            cv2.fillPoly(mask_img, np.int32([pointsRect]), (0, 0, 255))
+                            # topLeft = (int(center_point[0]-bracesSize), int(center_point[1]-(bracesSize+5)))
+                            # bottomRight = (int(center_point[0]+bracesSize), int(center_point[1]+(bracesSize+5)))
 
-                        src = Image.open(mask_path)
-
-                        im2 = src.crop(src.getbbox())
-                        lasted_path = mask_path
-                        im2.save(mask_path)
+                            # # topLeft =(716, 795)
+                            # # bottomRight =(732, 769)
+                            # cv2.rectangle(mask_img,topLeft,
+                            #              bottomRight, color= (0,0,255),thickness= -1)
+                            lasted_path = mask_path
+                            cv2.imwrite(mask_path, mask_img)
 
                 if save_img or save_crop or view_img:  # Add bbox to image
                     c = int(cls)  # integer class
@@ -267,7 +275,49 @@ def predict_model(
                     # annotator.draw.polygon(segments[j], outline=colors(c, True), width=3)
                 if save_crop:
                     save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+
+            if canDrawBraces:
+                def takeSecond(elem):
+                    return elem[0]
+
+                bracesList.sort(key=takeSecond)
+
+                bracesList = np.array(bracesList, dtype=np.int32)
+                print(bracesList)
+
+                src = cv2.imread(mask_path, 1)
+                for i in range(len(bracesList) - 1):
+                    cv2.line(src, (bracesList[i][0], bracesList[i][1]),
+                             (bracesList[i + 1][0], bracesList[i + 1][1]), (0, 0, 255), 3)
+
+                # cv2.line(src, [bracesList],
+                #         False, (0,0,255), 1)
+
+                cv2.imwrite(mask_path, src)
+
+            # # Convert black pixels to transparent and keep white pixels
+            src = cv2.imread(mask_path, 1)
+            tmp = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            # Applying thresholding technique
+            _, alpha = cv2.threshold(tmp, 0, 255, cv2.THRESH_BINARY)
+
+            # Using cv2.split() to split channels
+            # of coloured image
+            b, g, r = cv2.split(src)
+
+            # Making list of Red, Green, Blue
+            # Channels and alpha
+            rgba = [b, g, r, alpha]
+            dst = cv2.merge(rgba, 4)
+            cv2.imwrite(mask_path, dst)
+
+            src = Image.open(mask_path)
+
+            im2 = src.crop(src.getbbox())
+            im2.save(mask_path)
+
             mask_bboxes_per_frame_filtered.append(frame_mask_bboxes_filtered)
+
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'image':
@@ -313,12 +363,22 @@ def position_center(save_dir):
     f = open(output_path, "r")
     data = json.loads(f.read())
     all_values_y = []
+    all_values_y_temp = []
+    all_values_height = []
     for label_data in data:
         for label_key, label_coords in label_data.items():
             for coords_list in label_coords:
                 for coords in coords_list:
                     all_values_y.extend({coords[1]})
-    return np.mean(all_values_y)
+                    all_values_y_temp.extend({coords[1]})
+                all_values_height.append(np.amax(all_values_y_temp) - np.amin(all_values_y_temp))
+
+    print('position_center')
+    print(np.mean(all_values_y))
+    print('position_center')
+    # return np.mean(all_values_y)
+    print(max(all_values_height))
+    return np.amin(all_values_y) + max(all_values_height) / 3
 
 
 def parse_opt():
